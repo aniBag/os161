@@ -123,6 +123,7 @@ struct thread *
 thread_create(const char *name)
 {
 	struct thread *thread;
+	static unsigned long id = 0;
 
 	DEBUGASSERT(name != NULL);
 	if (strlen(name) > MAX_NAME_LENGTH) {
@@ -153,6 +154,10 @@ thread_create(const char *name)
 	thread->t_iplhigh_count = 1; /* corresponding to t_curspl */
 
 	/* If you add to struct thread, be sure to initialize here */
+
+	thread->id = id;
+	//kprintf("Thread Created: %02lu\n",thread->id);
+	id++;
 
 	return thread;
 }

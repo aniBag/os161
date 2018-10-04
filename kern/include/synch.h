@@ -34,8 +34,9 @@
  * Header file for synchronization primitives.
  */
 
-
 #include <spinlock.h>
+#define RTHREADS	64
+#define MAXRTHREADS	10
 
 /*
  * Dijkstra-style semaphore.
@@ -73,8 +74,12 @@ void V(struct semaphore *);
  * (should be) made internally.
  */
 struct lock {
-        char *lk_name;
-        HANGMAN_LOCKABLE(lk_hangman);   /* Deadlock detector hook. */
+        char *lock_name;
+        HANGMAN_LOCKABLE(lk_hangman);   // Deadlock detector hook.
+	int lock_held;                  // 1 - Held, 0 - Free.
+	unsigned long id;               // Thread ID.
+	struct spinlock lock_spinlock;
+	struct wchan *lock_wchan;
         // add what you need here
         // (don't forget to mark things volatile as needed)
 };
@@ -114,6 +119,9 @@ bool lock_do_i_hold(struct lock *);
 
 struct cv {
         char *cv_name;
+	int cv_threads_waiting;
+	struct spinlock cv_spinlock;
+	struct wchan *cv_wchan;
         // add what you need here
         // (don't forget to mark things volatile as needed)
 };
@@ -150,6 +158,22 @@ void cv_broadcast(struct cv *cv, struct lock *lock);
 
 struct rwlock {
         char *rwlock_name;
+	HANGMAN_LOCKABLE(rwlk_hangman);   // Deadlock detector hook.
+
+	int r_counter;                    // Count for Reader Threads
+
+	int rlock_held;                   // -1 - Free, >-1 - Held
+	int wlock_held;                   // 0 - Free, 1 - Held
+
+	unsigned long r_id[RTHREADS];     // IDs of the Reading Threads
+	unsigned long w_id;               // ID of the Writing Thread
+
+	struct spinlock rlock_spinlock;   // Spinlock for Read Operations
+	struct spinlock wlock_spinlock;   // Spinlock for Write Operations
+
+	struct wchan *rlock_wchan;	  // Read Wait Channel
+	struct wchan *wlock_wchan;        // Write Wait Channel
+
         // add what you need here
         // (don't forget to mark things volatile as needed)
 };
@@ -173,5 +197,6 @@ void rwlock_acquire_read(struct rwlock *);
 void rwlock_release_read(struct rwlock *);
 void rwlock_acquire_write(struct rwlock *);
 void rwlock_release_write(struct rwlock *);
+bool rwlock_do_i_hold_write(struct rwlock *);
 
 #endif /* _SYNCH_H_ */

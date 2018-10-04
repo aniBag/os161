@@ -43,7 +43,7 @@
 #include <kern/test161.h>
 #include <spinlock.h>
 
-#define CREATELOOPS		8
+#define CREATELOOPS    8
 #define NSEMLOOPS     63
 #define NLOCKLOOPS    120
 #define NCVLOOPS      5
@@ -238,6 +238,7 @@ locktestthread(void *junk, unsigned long num)
 	}
 
 	V(donesem);
+	kprintf("Thread: %02lu\n",num);
 	return;
 
 fail:
@@ -256,7 +257,8 @@ locktest(int nargs, char **args)
 
 	int i, result;
 
-	kprintf_n("Starting lt1...\n");
+	kprintf_n("Starting lt1...\n\n");
+
 	for (i=0; i<CREATELOOPS; i++) {
 		kprintf_t(".");
 		testlock = lock_create("testlock");
@@ -508,7 +510,7 @@ cvtestthread(void *junk, unsigned long num)
 		random_yielder(4);
 		failif((testval1 != testval2));
 
-		kprintf_n("Thread %lu\n", testval2);
+		kprintf_n("Thread: %02lu\n", testval2);
 		testval1 = (testval1 + NTHREADS - 1) % NTHREADS;
 		lock_release(testlock);
 	}
@@ -599,7 +601,7 @@ sleepthread(void *junk1, unsigned long junk2)
 
 	unsigned i, j;
 
-	random_yielder(4);
+	//random_yielder(4);
 
 	for (j=0; j<NLOOPS; j++) {
 		kprintf_t(".");
@@ -629,7 +631,7 @@ wakethread(void *junk1, unsigned long junk2)
 
 	unsigned i, j;
 
-	random_yielder(4);
+	//random_yielder(4);
 
 	for (j=0; j<NLOOPS; j++) {
 		kprintf_t(".");

@@ -39,6 +39,7 @@
 #include <array.h>
 #include <spinlock.h>
 #include <threadlist.h>
+#include <wchan.h>
 
 struct cpu;
 
@@ -115,6 +116,8 @@ struct thread {
 	/*
 	 * Public fields
 	 */
+
+	unsigned long id;               // Thread ID.
 
 	/* add more here as needed */
 };

@@ -148,13 +148,26 @@ lock_create(const char *name)
 		return NULL;
 	}
 
-	lock->lk_name = kstrdup(name);
-	if (lock->lk_name == NULL) {
+	lock->lock_name = kstrdup(name);
+
+	if (lock->lock_name == NULL) {
 		kfree(lock);
 		return NULL;
 	}
 
-	HANGMAN_LOCKABLEINIT(&lock->lk_hangman, lock->lk_name);
+	lock->lock_wchan = wchan_create(lock->lock_name);
+	if (lock->lock_wchan == NULL) {
+		kfree(lock->lock_name);
+		kfree(lock);
+		return NULL;
+	}
+
+	spinlock_init(&lock->lock_spinlock);
+
+	lock->lock_held = 0;
+	lock->id = -1;
+
+	HANGMAN_LOCKABLEINIT(&lock->lk_hangman, lock->lock_name);
 
 	// add stuff here as needed
 
@@ -165,46 +178,65 @@ void
 lock_destroy(struct lock *lock)
 {
 	KASSERT(lock != NULL);
+	
+	if (lock->lock_held == 1)
+	{
+		panic("Lock is Acquired. Cannot Destroy...\n");
+	}
 
-	// add stuff here as needed
-
-	kfree(lock->lk_name);
+	spinlock_cleanup(&lock->lock_spinlock);
+	wchan_destroy(lock->lock_wchan);
+	kfree(lock->lock_name);
 	kfree(lock);
 }
 
 void
 lock_acquire(struct lock *lock)
 {
-	/* Call this (atomically) before waiting for a lock */
-	//HANGMAN_WAIT(&curthread->t_hangman, &lock->lk_hangman);
+	KASSERT (lock != NULL);
 
-	// Write this
+	spinlock_acquire(&lock->lock_spinlock);
+	HANGMAN_WAIT(&curthread->t_hangman, &lock->lk_hangman);
 
-	(void)lock;  // suppress warning until code gets written
+	while (lock->lock_held == 1)
+	{
+		wchan_sleep(lock->lock_wchan, &lock->lock_spinlock);
+	}
 
-	/* Call this (atomically) once the lock is acquired */
-	//HANGMAN_ACQUIRE(&curthread->t_hangman, &lock->lk_hangman);
+	if (lock->lock_held == 0)
+	{
+		lock->lock_held = 1;
+		lock->id = curthread->id;
+		HANGMAN_ACQUIRE(&curthread->t_hangman, &lock->lk_hangman);
+
+		spinlock_release(&lock->lock_spinlock);
+	}
 }
 
 void
 lock_release(struct lock *lock)
 {
-	/* Call this (atomically) when the lock is released */
-	//HANGMAN_RELEASE(&curthread->t_hangman, &lock->lk_hangman);
+	KASSERT(lock != NULL);
+	KASSERT(lock_do_i_hold(lock));
+	
+	spinlock_acquire(&lock->lock_spinlock);
+	
+	lock->lock_held = 0;
+	lock->id = -1;
 
-	// Write this
+	HANGMAN_RELEASE(&curthread->t_hangman, &lock->lk_hangman);
 
-	(void)lock;  // suppress warning until code gets written
+	wchan_wakeone(lock->lock_wchan, &lock->lock_spinlock);
+
+	spinlock_release(&lock->lock_spinlock);
 }
 
 bool
 lock_do_i_hold(struct lock *lock)
 {
-	// Write this
-
-	(void)lock;  // suppress warning until code gets written
-
-	return true; // dummy until code gets written
+	if (lock->lock_held == 1 && lock->id == curthread->id)
+		return true;
+	else return false;
 }
 
 ////////////////////////////////////////////////////////////
@@ -228,6 +260,17 @@ cv_create(const char *name)
 		return NULL;
 	}
 
+	cv->cv_wchan = wchan_create(cv->cv_name);
+	if (cv->cv_wchan == NULL) {
+		kfree(cv->cv_name);
+		kfree(cv);
+		return NULL;
+	}
+
+	spinlock_init(&cv->cv_spinlock);
+
+	cv->cv_threads_waiting = 0;
+
 	// add stuff here as needed
 
 	return cv;
@@ -238,8 +281,15 @@ cv_destroy(struct cv *cv)
 {
 	KASSERT(cv != NULL);
 
+	if (cv->cv_threads_waiting > 0)
+	{
+		panic("Thread(s) Active. Cannot Destroy CV...\n");
+	}
+
 	// add stuff here as needed
 
+	spinlock_cleanup(&cv->cv_spinlock);
+	wchan_destroy(cv->cv_wchan);
 	kfree(cv->cv_name);
 	kfree(cv);
 }
@@ -247,23 +297,215 @@ cv_destroy(struct cv *cv)
 void
 cv_wait(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	KASSERT(lock != NULL);
+	KASSERT(cv != NULL);
+
+	KASSERT(lock_do_i_hold(lock));
+	
+	lock_release(lock);
+
+	spinlock_acquire(&cv->cv_spinlock);
+	cv->cv_threads_waiting++;
+	wchan_sleep(cv->cv_wchan, &cv->cv_spinlock);
+	cv->cv_threads_waiting--;
+	spinlock_release(&cv->cv_spinlock);
+
+	lock_acquire(lock);
 }
 
 void
 cv_signal(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	KASSERT(lock != NULL);
+	KASSERT(lock_do_i_hold(lock));
+
+	spinlock_acquire(&cv->cv_spinlock);
+	wchan_wakeone(cv->cv_wchan, &cv->cv_spinlock);
+	spinlock_release(&cv->cv_spinlock);
 }
 
 void
 cv_broadcast(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	KASSERT(lock != NULL);
+	KASSERT(lock_do_i_hold(lock));
+
+	spinlock_acquire(&cv->cv_spinlock);
+	wchan_wakeall(cv->cv_wchan, &cv->cv_spinlock);
+	spinlock_release(&cv->cv_spinlock);
+}
+
+////////////////////////////////////////////////////////////
+//
+// RWLOCKS
+
+struct rwlock * rwlock_create(const char *name)
+{
+	struct rwlock *rwlock;
+
+	int i;
+
+	rwlock = kmalloc(sizeof(*rwlock));
+	if (rwlock == NULL) {
+		return NULL;
+	}
+
+	rwlock->rwlock_name = kstrdup(name);
+
+	if (rwlock->rwlock_name == NULL) {
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rlock_wchan = wchan_create(rwlock->rwlock_name);
+	if (rwlock->rlock_wchan == NULL) {
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->wlock_wchan = wchan_create(rwlock->rwlock_name);
+	if (rwlock->wlock_wchan == NULL) {
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	spinlock_init(&rwlock->rlock_spinlock);
+	spinlock_init(&rwlock->wlock_spinlock);
+
+	rwlock->wlock_held = 0;
+	rwlock->w_id = -1;
+	rwlock->r_counter = 0;
+	rwlock->rlock_held = -1;
+	for (i=0; i<RTHREADS; i++) {
+		rwlock->r_id[i] = -1;
+	}
+
+	HANGMAN_LOCKABLEINIT(&rwlock->rwlk_hangman, rwlock->rwlock_name);
+
+	// add stuff here as needed
+
+	return rwlock;
+}
+
+void rwlock_destroy(struct rwlock *rwlock)
+{
+	KASSERT(rwlock != NULL);
+	
+	if (rwlock->r_counter > 0 || rwlock->wlock_held == 1)
+	{
+		panic("Lock is Acquired. Cannot Destroy...\n");
+	}
+
+	spinlock_cleanup(&rwlock->rlock_spinlock);
+	spinlock_cleanup(&rwlock->wlock_spinlock);
+
+	wchan_destroy(rwlock->rlock_wchan);
+	wchan_destroy(rwlock->wlock_wchan);
+
+	kfree(rwlock->rwlock_name);
+	kfree(rwlock);
+}
+
+void 
+rwlock_acquire_read(struct rwlock *rwlock)
+{
+	KASSERT (rwlock != NULL);
+	KASSERT (rwlock->r_counter >= 0);
+
+	spinlock_acquire(&rwlock->rlock_spinlock);
+
+	while (rwlock->wlock_held == 1) {
+		wchan_sleep(rwlock->rlock_wchan, &rwlock->rlock_spinlock);
+	}
+	
+	rwlock->r_id[++rwlock->rlock_held] = curthread->id;
+	rwlock->r_counter++;
+
+	spinlock_release(&rwlock->rlock_spinlock);
+}
+
+void 
+rwlock_release_read(struct rwlock *rwlock)
+{
+	KASSERT (rwlock != NULL);
+	KASSERT (rwlock->r_counter > 0);
+
+	int result = 0; 
+	int i;
+
+	spinlock_acquire(&rwlock->rlock_spinlock);
+
+	for (i=0; i<RTHREADS; i++) {
+		if (rwlock->r_id[i] == curthread->id) {
+			result = i;
+		}
+	}
+
+//	if (result > 0) 
+	{
+		rwlock->r_id[result] = -1;
+		rwlock->r_counter--;
+	}
+//	else panic("Cannot release Read Lock. Never acquired it. | %02lu", curthread->id);
+
+	spinlock_release(&rwlock->rlock_spinlock);
+
+	spinlock_acquire(&rwlock->wlock_spinlock);
+	wchan_wakeone(rwlock->wlock_wchan, &rwlock->wlock_spinlock);
+	spinlock_release(&rwlock->wlock_spinlock);
+}
+
+void 
+rwlock_acquire_write(struct rwlock *rwlock)
+{
+	KASSERT (rwlock != NULL);
+
+	spinlock_acquire(&rwlock->wlock_spinlock);
+	HANGMAN_WAIT(&curthread->t_hangman, &rwlock->rwlk_hangman);
+
+	while (rwlock->wlock_held == 1 || rwlock->r_counter > 0)
+	{
+		wchan_sleep(rwlock->wlock_wchan, &rwlock->wlock_spinlock);
+	}
+
+	if (rwlock->wlock_held == 0 && rwlock->r_counter == 0)
+	{
+		rwlock->wlock_held = 1;
+		rwlock->w_id = curthread->id;
+		HANGMAN_ACQUIRE(&curthread->t_hangman, &rwlock->rwlk_hangman);
+
+		spinlock_release(&rwlock->wlock_spinlock);
+	}
+}
+
+void 
+rwlock_release_write(struct rwlock *rwlock)
+{
+	KASSERT(rwlock != NULL);
+	KASSERT(rwlock_do_i_hold_write(rwlock));
+	
+	spinlock_acquire(&rwlock->wlock_spinlock);
+	
+	rwlock->wlock_held = 0;
+	rwlock->w_id = -1;
+
+	HANGMAN_RELEASE(&curthread->t_hangman, &rwlock->rwlk_hangman);
+	
+	spinlock_acquire(&rwlock->rlock_spinlock);
+	wchan_wakeall(rwlock->rlock_wchan, &rwlock->rlock_spinlock);
+	spinlock_release(&rwlock->rlock_spinlock);
+
+	wchan_wakeone(rwlock->wlock_wchan, &rwlock->wlock_spinlock);
+
+	spinlock_release(&rwlock->wlock_spinlock);
+}
+
+bool
+rwlock_do_i_hold_write(struct rwlock *rwlock)
+{
+	if (rwlock->wlock_held == 1 && rwlock->w_id == curthread->id)
+		return true;
+	else return false;
 }
